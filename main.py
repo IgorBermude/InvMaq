@@ -54,7 +54,7 @@ def cria_db():
             maquina_id INTEGER NOT NULL,
             evento TEXT,
             responsavel TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT (datetime('now','localtime')),
             ip TEXT,
             mac TEXT,
             FOREIGN KEY(maquina_id) REFERENCES maquinas(id) ON DELETE CASCADE
