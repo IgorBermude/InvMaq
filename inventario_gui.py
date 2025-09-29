@@ -1,0 +1,821 @@
+import sqlite3
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+
+DB = "historico_maquinas.db"
+
+# ----------------- Banco -----------------
+def get_conn():
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
+
+def init_db():
+    conn = get_conn()
+    c = conn.cursor()
+    # Tabelas alinhadas ao novo esquema
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS maquinas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        linha INTEGER,
+        nome TEXT,
+        usuario TEXT,
+        setor TEXT,
+        andar TEXT,
+        ip TEXT,
+        mac TEXT UNIQUE NOT NULL,
+        ponto TEXT,
+        comentario TEXT
+    )
+    """)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS historico_maquinas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        maquina_id INTEGER NOT NULL,
+        evento TEXT,
+        responsavel TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        ip TEXT,
+        mac TEXT,
+        FOREIGN KEY(maquina_id) REFERENCES maquinas(id) ON DELETE CASCADE
+    )
+    """)
+    # indices basicos
+    c.execute("CREATE INDEX IF NOT EXISTS idx_maquinas_ip ON maquinas(ip);")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_hist_maquina_id ON historico_maquinas(maquina_id);")
+    # Migração leve para DBs antigos
+    c.execute("PRAGMA table_info(historico_maquinas);")
+    cols = {row[1] for row in c.fetchall()}
+    if "ip" not in cols:
+        c.execute("ALTER TABLE historico_maquinas ADD COLUMN ip TEXT;")
+    if "mac" not in cols:
+        c.execute("ALTER TABLE historico_maquinas ADD COLUMN mac TEXT;")
+    conn.commit()
+    conn.close()
+
+def run_query(query, params=(), fetch=False):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(query, params)
+    rows = c.fetchall() if fetch else None
+    conn.commit()
+    conn.close()
+    return rows
+
+
+# ---------- Diálogo de cadastro de Máquina ----------
+class MaquinaDialog(tk.Toplevel):
+    def __init__(self, master, linha: int):
+        super().__init__(master)
+        self.title("Cadastrar Máquina")
+        self.resizable(False, False)
+        self.result = None  # dict com os campos ou None
+
+        self.transient(master)
+        self.grab_set()
+
+        frm = ttk.Frame(self, padding=10)
+        frm.grid(row=0, column=0, sticky="nsew")
+
+        # Campos
+        ttk.Label(frm, text=f"Linha: {linha}").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0,6))
+
+        self.var_nome = tk.StringVar()
+        self.var_usuario = tk.StringVar()
+        self.var_setor = tk.StringVar()
+        self.var_andar = tk.StringVar()
+        self.var_ip = tk.StringVar()
+        self.var_mac = tk.StringVar()
+        self.var_ponto = tk.StringVar()
+        self.var_comentario = tk.StringVar()
+
+        row = 1
+        for lbl, var in [
+            ("Nome", self.var_nome),
+            ("Usuário", self.var_usuario),
+            ("Setor", self.var_setor),
+            ("Andar", self.var_andar),
+            ("IP", self.var_ip),
+            ("MAC", self.var_mac),
+            ("Ponto", self.var_ponto),
+            ("Comentário", self.var_comentario),
+        ]:
+            ttk.Label(frm, text=lbl + ":").grid(row=row, column=0, sticky="e", padx=(0,6), pady=2)
+            ttk.Entry(frm, textvariable=var, width=40).grid(row=row, column=1, sticky="w", pady=2)
+            row += 1
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=row, column=0, columnspan=2, sticky="e", pady=(8,0))
+        ttk.Button(btns, text="Cancelar", command=self._on_cancel).pack(side="right", padx=(6,0))
+        ttk.Button(btns, text="Salvar", command=self._on_save).pack(side="right")
+
+        # Enter navega entre campos; Shift+Enter volta
+        self.bind("<Return>", self._focus_next)
+        self.bind("<KP_Enter>", self._focus_next)
+        self.bind("<Shift-Return>", self._focus_prev)
+        self.bind("<Shift-KP_Enter>", self._focus_prev)
+        self.bind("<Escape>", lambda e: self._on_cancel())
+
+        # Centraliza sobre a janela mãe
+        self.update_idletasks()
+        if master and master.winfo_exists():
+            x = master.winfo_rootx() + (master.winfo_width() // 2) - (self.winfo_width() // 2)
+            y = master.winfo_rooty() + (master.winfo_height() // 2) - (self.winfo_height() // 2)
+            self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    def _focus_next(self, event):
+        w = self.focus_get()
+        nxt = w.tk_focusNext() if w else None
+        if nxt:
+            nxt.focus_set()
+            try:
+                nxt.selection_range(0, 'end')  # seleciona texto se for Entry
+            except Exception:
+                pass
+        return "break"
+
+    def _focus_prev(self, event):
+        w = self.focus_get()
+        prv = w.tk_focusPrev() if w else None
+        if prv:
+            prv.focus_set()
+            try:
+                prv.selection_range(0, 'end')
+            except Exception:
+                pass
+        return "break"
+
+    def _on_save(self):
+        mac = (self.var_mac.get() or "").strip()
+        if not mac:
+            messagebox.showerror("Erro", "MAC é obrigatório", parent=self)
+            return
+        self.result = {
+            "nome": (self.var_nome.get() or "").strip(),
+            "usuario": (self.var_usuario.get() or "").strip(),
+            "setor": (self.var_setor.get() or "").strip(),
+            "andar": (self.var_andar.get() or "").strip(),
+            "ip": (self.var_ip.get() or "").strip(),
+            "mac": mac,
+            "ponto": (self.var_ponto.get() or "").strip(),
+            "comentario": (self.var_comentario.get() or "").strip(),
+        }
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.destroy()
+
+# ---------- Diálogo de cadastro de Máquina ----------
+class HistoricoDialog(tk.Toplevel):
+    def __init__(self, master, nome: str):
+        super().__init__(master)
+        self.title("Cadastrar Historico de maquina")
+        self.resizable(False, False)
+        self.result = None  # dict com os campos ou None
+
+        self.transient(master)
+        self.grab_set()
+
+        frm = ttk.Frame(self, padding=10)
+        frm.grid(row=0, column=0, sticky="nsew")
+        frm.columnconfigure(1, weight=1)  # expande a coluna do campo
+
+        # Campos
+        ttk.Label(frm, text=f"Nome: {nome}").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0,6))
+
+        # Campo grande para descrição (multilinha)
+        ttk.Label(frm, text="Descrição de evento:").grid(row=1, column=0, sticky="ne", padx=(0,6), pady=2)
+        txt_frame = ttk.Frame(frm)
+        txt_frame.grid(row=1, column=1, sticky="nsew", pady=2)
+        self.txt_evento = tk.Text(txt_frame, height=8, width=70, wrap="word")
+        vscroll = ttk.Scrollbar(txt_frame, orient="vertical", command=self.txt_evento.yview)
+        self.txt_evento.configure(yscrollcommand=vscroll.set)
+        self.txt_evento.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        self.var_responsavel = tk.StringVar()
+        ttk.Label(frm, text="Responsável:").grid(row=2, column=0, sticky="e", padx=(0,6), pady=2)
+        ttk.Entry(frm, textvariable=self.var_responsavel, width=40).grid(row=2, column=1, sticky="w", pady=2)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(8,0))
+        ttk.Button(btns, text="Cancelar", command=self._on_cancel).pack(side="right", padx=(6,0))
+        ttk.Button(btns, text="Salvar", command=self._on_save).pack(side="right")
+
+        # Enter navega; dentro do Text, Enter cria nova linha
+        self.bind("<Return>", self._focus_next)
+        self.bind("<KP_Enter>", self._focus_next)
+        self.bind("<Shift-Return>", self._focus_prev)
+        self.bind("<Shift-KP_Enter>", self._focus_prev)
+        self.bind("<Escape>", lambda e: self._on_cancel())
+
+        # Centraliza sobre a janela mãe
+        self.update_idletasks()
+        if master and master.winfo_exists():
+            x = master.winfo_rootx() + (master.winfo_width() // 2) - (self.winfo_width() // 2)
+            y = master.winfo_rooty() + (master.winfo_height() // 2) - (self.winfo_height() // 2)
+            self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    def _focus_next(self, event):
+        w = self.focus_get()
+        # Se estiver no Text, deixa o Enter inserir nova linha normalmente
+        if isinstance(w, tk.Text):
+            return
+        nxt = w.tk_focusNext() if w else None
+        if nxt:
+            nxt.focus_set()
+            try:
+                nxt.selection_range(0, 'end')
+            except Exception:
+                pass
+        return "break"
+
+    def _focus_prev(self, event):
+        w = self.focus_get()
+        if isinstance(w, tk.Text):
+            return
+        prv = w.tk_focusPrev() if w else None
+        if prv:
+            prv.focus_set()
+            try:
+                prv.selection_range(0, 'end')
+            except Exception:
+                pass
+        return "break"
+
+    def _on_save(self):
+        evento = (self.txt_evento.get("1.0", "end-1c") or "").strip()
+        if not evento:
+            messagebox.showerror("Erro", "Descrição de evento é obrigatório", parent=self)
+            return
+        self.result = {
+            "evento": evento,
+            "responsavel": (self.var_responsavel.get() or "").strip(),
+        }
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.destroy()
+        
+# ----------------- GUI -----------------
+class InventarioApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Inventário e Histórico de Máquinas")
+        self.maquina_ids = {}  # mapeia iid do tree para id da maquina
+        self.evento_ids = {}   # mapeia iid do tree de eventos para id do evento
+
+        # Estado e mapeamento para ordenação
+        self._m_col_map = {
+            "Linha": "linha",
+            "Nome": "nome",
+            "Usuario": "usuario",
+            "Setor": "setor",
+            "Andar": "andar",
+            "IP": "ip",
+            "MAC": "mac",
+            "Ponto": "ponto",
+            "Comentario": "comentario",
+        }
+        self.m_sort_by = "nome"
+        self.m_sort_desc = False
+
+        self._e_col_map = {
+            "Evento": "evento",
+            "Responsavel": "responsavel",
+            "Criado em": "created_at",
+            "IP": "ip",
+            "MAC": "mac",
+        }
+        self.e_sort_by = "created_at"
+        self.e_sort_desc = True  # mantém comportamento anterior (mais recentes primeiro)
+
+        # Estado da aba de pesquisa
+        self.search_target = tk.StringVar(value="maquinas")
+
+        # Notebook (abas)
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill="both", expand=True)
+
+        # Aba Máquinas
+        self.tab_maquinas = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_maquinas, text="Máquinas")
+
+        cols_m = ("Linha","Nome","Usuario","Setor","Andar","IP","MAC","Ponto","Comentario")
+        self.tree_maquinas = ttk.Treeview(self.tab_maquinas, columns=cols_m, show="headings")
+        for col in cols_m:
+            self.tree_maquinas.heading(col, text=col, command=lambda c=col: self._on_maquinas_heading(c))
+            self.tree_maquinas.column(col, width=120)
+        self.tree_maquinas.pack(fill="both", expand=True)
+
+        btns_frame = ttk.Frame(self.tab_maquinas)
+        btns_frame.pack(fill="x")
+        ttk.Button(btns_frame, text="Adicionar", command=self.add_maquina).pack(side="left", padx=5, pady=5)
+        ttk.Button(btns_frame, text="Remover", command=self.del_maquina).pack(side="left", padx=5, pady=5)
+        ttk.Button(btns_frame, text="Atualizar", command=self.load_maquinas).pack(side="left", padx=5, pady=5)
+        # Botão Editar (máquina): nome exclusivo e inicia desabilitado
+        self.btn_editar_maquina = ttk.Button(btns_frame, text="Editar", command=self.update_maquina)
+        self.btn_editar_maquina.pack(side="left", padx=5, pady=5)
+        self.btn_editar_maquina.configure(state="disabled")
+
+        # Aba Eventos (apenas historico_maquinas)
+        self.tab_eventos = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_eventos, text="Histórico de Eventos")
+
+        self.tree_eventos = ttk.Treeview(
+            self.tab_eventos,
+            columns=("Evento","Responsavel","Criado em","IP","MAC"),
+            show="headings"
+        )
+        self.tree_eventos.heading("Evento", text="Evento", command=lambda: self._on_eventos_heading("Evento"))
+        self.tree_eventos.heading("Responsavel", text="Responsável", command=lambda: self._on_eventos_heading("Responsavel"))
+        self.tree_eventos.heading("Criado em", text="Criado em", command=lambda: self._on_eventos_heading("Criado em"))
+        self.tree_eventos.heading("IP", text="IP", command=lambda: self._on_eventos_heading("IP"))
+        self.tree_eventos.heading("MAC", text="MAC", command=lambda: self._on_eventos_heading("MAC"))
+        self.tree_eventos.pack(fill="both", expand=True)
+
+        btns_evt = ttk.Frame(self.tab_eventos)
+        btns_evt.pack(fill="x")
+        ttk.Button(btns_evt, text="Adicionar Evento", command=self.add_evento).pack(side="left", padx=5, pady=5)
+        ttk.Button(btns_evt, text="Carregar Eventos", command=self.load_eventos).pack(side="left", padx=5, pady=5)
+        ttk.Button(btns_evt, text="Remover Evento", command=self.del_evento).pack(side="left", padx=5, pady=5)
+        ttk.Label(btns_evt, text=self.get_nome()).pack(side="left", padx=5, pady=5)
+        # Botão Editar (evento): novo botão e inicia desabilitado
+        self.btn_editar_evento = ttk.Button(btns_evt, text="Editar Evento", command=self.update_evento)
+        self.btn_editar_evento.pack(side="left", padx=5, pady=5)
+        self.btn_editar_evento.configure(state="disabled")
+
+        # Aba Pesquisa
+        self.tab_pesquisa = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_pesquisa, text="Pesquisa")
+
+        top_pesq = ttk.Frame(self.tab_pesquisa)
+        top_pesq.pack(fill="x", padx=5, pady=5)
+
+        ttk.Label(top_pesq, text="Termo:").pack(side="left")
+        self.entry_busca = ttk.Entry(top_pesq, width=40)
+        self.entry_busca.pack(side="left", padx=5)
+
+        ttk.Radiobutton(top_pesq, text="Máquinas", value="maquinas", variable=self.search_target, command=lambda: self._configure_search_columns()).pack(side="left", padx=6)
+        ttk.Radiobutton(top_pesq, text="Eventos", value="eventos", variable=self.search_target, command=lambda: self._configure_search_columns()).pack(side="left", padx=6)
+
+        ttk.Button(top_pesq, text="Pesquisar", command=self.do_pesquisar).pack(side="left", padx=8)
+
+        self.tree_pesquisa = ttk.Treeview(self.tab_pesquisa, show="headings")
+        self.tree_pesquisa.pack(fill="both", expand=True, padx=5, pady=5)
+        self._configure_search_columns()  # define colunas iniciais
+
+        # Mapeia itens da pesquisa -> id da máquina, e ativa seleção por duplo clique/Enter
+        self._pesquisa_iid_to_mid = {}
+        self.tree_pesquisa.bind("<Double-1>", self._on_pesquisa_activate)
+        self.tree_pesquisa.bind("<Return>", self._on_pesquisa_activate)
+
+        # Vai para a aba de Historico eventos ao clicar em um maquina
+        self.tree_maquinas.bind("<Double-1>", self._on_machine_activated)
+        # Habilita/desabilita o botão Editar (máquina) conforme a seleção
+        self.tree_maquinas.bind("<<TreeviewSelect>>", lambda e: self._update_edit_button_state())
+        # Habilita/desabilita o botão Editar (evento) conforme a seleção
+        self.tree_eventos.bind("<<TreeviewSelect>>", lambda e: self._update_event_edit_button_state())
+
+        # Carregar eventos ao entrar na aba "Histórico de Eventos"
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        self.load_maquinas()
+
+    # ---------- Utilitários de linha ----------
+    def _get_next_linha(self) -> int:
+        row = run_query("SELECT COALESCE(MAX(linha), 0) + 1 AS prox FROM maquinas", fetch=True)
+        return row[0]["prox"] if row else 1
+
+    def get_nome(self) -> str:
+        sel = self.tree_maquinas.selection()
+        if not sel:
+            return ""
+        iid = sel[0]
+        return self.tree_maquinas.item(iid)["values"][1]  # coluna Nome
+
+    def _renumerar_linhas(self):
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("""
+            SELECT id
+            FROM maquinas
+            ORDER BY CASE WHEN linha IS NULL THEN 1 ELSE 0 END, linha ASC, id ASC
+        """)
+        ids = [r[0] for r in c.fetchall()]
+        for idx, mid in enumerate(ids, start=1):
+            c.execute("UPDATE maquinas SET linha=? WHERE id=?", (idx, mid))
+        conn.commit()
+        conn.close()
+
+    # ---------- Máquinas ----------
+    def load_maquinas(self):
+        # Limpa mapping e grid
+        self.maquina_ids.clear()
+        for i in self.tree_maquinas.get_children():
+            self.tree_maquinas.delete(i)
+        order_col = self.m_sort_by if self.m_sort_by in self._m_col_map.values() else "nome"
+        order_dir = "DESC" if self.m_sort_desc else "ASC"
+        rows = run_query(
+            f"SELECT id, linha, nome, usuario, setor, andar, ip, mac, ponto, comentario FROM maquinas ORDER BY {order_col} {order_dir}",
+            fetch=True
+        )
+        for r in rows:
+            iid = self.tree_maquinas.insert(
+                "", "end",
+                values=(r["linha"], r["nome"], r["usuario"], r["setor"], r["andar"], r["ip"], r["mac"], r["ponto"], r["comentario"]) 
+            )
+            self.maquina_ids[iid] = r["id"]
+        # Atualiza o estado do botão Editar após recarregar a lista
+        self._update_edit_button_state()
+
+    def update_maquina(self):
+        maquina_id = self._selected_maquina_id()
+        if not maquina_id:
+            messagebox.showinfo("Info", "Selecione uma máquina na aba Máquinas")
+            return
+        # Pega dados atuais
+        row = run_query(
+            "SELECT linha, nome, usuario, setor, andar, ip, mac, ponto, comentario FROM maquinas WHERE id=?",
+            (maquina_id,), fetch=True
+        )
+        if not row:
+            messagebox.showerror("Erro", "Máquina não encontrada no banco")
+            return
+        dados_atual = row[0]
+        # Abre diálogo preenchido
+        dlg = MaquinaDialog(self.root, dados_atual["linha"])
+        dlg.var_nome.set(dados_atual["nome"] or "")
+        dlg.var_usuario.set(dados_atual["usuario"] or "")
+        dlg.var_setor.set(dados_atual["setor"] or "")
+        dlg.var_andar.set(dados_atual["andar"] or "")
+        dlg.var_ip.set(dados_atual["ip"] or "")
+        dlg.var_mac.set(dados_atual["mac"] or "")
+        dlg.var_ponto.set(dados_atual["ponto"] or "")
+        dlg.var_comentario.set(dados_atual["comentario"] or "")
+        self.root.wait_window(dlg)
+        if not getattr(dlg, "result", None):
+            return
+        dados = dlg.result
+        try:
+            run_query(
+                """
+                UPDATE maquinas
+                SET nome=?, usuario=?, setor=?, andar=?, ip=?, mac=?, ponto=?, comentario=?
+                WHERE id=?
+                """,
+                (dados["nome"], dados["usuario"], dados["setor"], dados["andar"], dados["ip"], dados["mac"], dados["ponto"], dados["comentario"], maquina_id)
+            )
+            self.load_maquinas()
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Erro", "MAC já cadastrado!")        
+
+    def _on_maquinas_heading(self, col_label: str):
+        db_col = self._m_col_map.get(col_label, "nome")
+        if self.m_sort_by == db_col:
+            self.m_sort_desc = not self.m_sort_desc
+        else:
+            self.m_sort_by = db_col
+            self.m_sort_desc = False
+        self.load_maquinas()
+
+    def _selected_maquina_id(self):
+        sel = self.tree_maquinas.selection()
+        if not sel:
+            return None
+        iid = sel[0]
+        return self.maquina_ids.get(iid)
+
+    # Atualiza estado do botão Editar (máquina) conforme a seleção atual
+    def _update_edit_button_state(self):
+        has_sel = bool(self.tree_maquinas.selection())
+        try:
+            self.btn_editar_maquina.configure(state=("normal" if has_sel else "disabled"))
+        except Exception:
+            pass
+
+    def _update_event_edit_button_state(self):
+        has_sel =  bool(self.tree_eventos.selection())
+        try:
+            self.btn_editar_evento.configure(state=("normal" if has_sel else "disabled"))
+        except Exception:
+            pass
+
+    def add_maquina(self):
+        # Abre diálogo único e usa linha automática (MAX(linha)+1)
+        linha = self._get_next_linha()
+        dlg = MaquinaDialog(self.root, linha)
+        self.root.wait_window(dlg)
+        if not getattr(dlg, "result", None):
+            return
+        dados = dlg.result
+        try:
+            run_query(
+                """
+                INSERT INTO maquinas (linha, nome, usuario, setor, andar, ip, mac, ponto, comentario)
+                VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (linha, dados["nome"], dados["usuario"], dados["setor"], dados["andar"], dados["ip"], dados["mac"], dados["ponto"], dados["comentario"])
+            )
+            self.load_maquinas()
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Erro", "MAC já cadastrado!")
+
+    def del_maquina(self):
+        maquina_id = self._selected_maquina_id()
+        if not maquina_id:
+            messagebox.showinfo("Info", "Selecione uma máquina na aba Máquinas")
+            return
+        # Pega info para confirmação
+        sel = self.tree_maquinas.selection()[0]
+        vals = self.tree_maquinas.item(sel)["values"]
+        mac = vals[6] if len(vals) > 6 else ""
+        if messagebox.askyesno("Confirmação", f"Excluir máquina {mac}? Isso removerá também o histórico."):
+            run_query("DELETE FROM maquinas WHERE id=?", (maquina_id,))
+            # Renumera linhas para que fiquem 1..N sem buracos
+            self._renumerar_linhas()
+            self.load_maquinas()
+
+    # ---------- Eventos ----------
+    def load_eventos(self):
+        for i in self.tree_eventos.get_children():
+            self.tree_eventos.delete(i)
+        # zera o mapeamento de eventos
+        self.evento_ids.clear()
+        maquina_id = self._selected_maquina_id()
+        if not maquina_id:
+            messagebox.showinfo("Info", "Selecione uma máquina na aba Máquinas")
+            return
+        order_col = self.e_sort_by if self.e_sort_by in self._e_col_map.values() else "created_at"
+        order_dir = "DESC" if self.e_sort_desc else "ASC"
+        rows = run_query(
+            f"""
+            SELECT id, evento, responsavel, created_at, ip, mac
+            FROM historico_maquinas
+            WHERE maquina_id=?
+            ORDER BY {order_col} {order_dir}
+            """,
+            (maquina_id,), fetch=True
+        )
+        for r in rows:
+            iid = self.tree_eventos.insert("", "end", values=(r["evento"], r["responsavel"], r["created_at"], r["ip"], r["mac"]))
+            self.evento_ids[iid] = r["id"]
+        # Atualiza o estado do botão Editar Evento após recarregar a lista
+        self._update_event_edit_button_state()
+
+    def update_evento(self):
+        evento_id = self._selected_evento_id()
+        if not evento_id:
+            messagebox.showinfo("Info", "Selecione um evento na aba Eventos")
+            return
+        # Pega dados atuais
+        row = run_query(
+            "SELECT evento, responsavel FROM historico_maquinas WHERE id=?",
+            (evento_id,), fetch=True
+        )
+        if not row:
+            messagebox.showerror("Erro", "Evento não encontrado no banco")
+            return
+        dados_atual = row[0]
+        # Abre diálogo preenchido
+        nome = self.get_nome()
+        dlg = HistoricoDialog(self.root, nome)
+        dlg.txt_evento.insert("1.0", dados_atual["evento"] or "")
+        dlg.var_responsavel.set(dados_atual["responsavel"] or "")
+        self.root.wait_window(dlg)
+        if not getattr(dlg, "result", None):
+            return
+        dados = dlg.result
+        try:
+            run_query(
+                """
+                UPDATE historico_maquinas
+                SET evento=?, responsavel=?
+                WHERE id=?
+                """,
+                (dados["evento"], dados["responsavel"], evento_id)
+            )
+            self.load_eventos()
+        except sqlite3.Error as e:
+            messagebox.showerror("Erro", f"Não foi possível atualizar o evento:\n{e}")
+
+    def _on_eventos_heading(self, col_label: str):
+        db_col = self._e_col_map.get(col_label, "created_at")
+        if self.e_sort_by == db_col:
+            self.e_sort_desc = not self.e_sort_desc
+        else:
+            self.e_sort_by = db_col
+            # padrão: desc apenas para created_at; demais iniciam asc
+            self.e_sort_desc = True if db_col == "created_at" else False
+        # Recarrega somente se houver máquina selecionada
+        if self._selected_maquina_id():
+            self.load_eventos()
+
+    def add_evento(self):
+        maquina_id = self._selected_maquina_id()
+        if not maquina_id:
+            messagebox.showinfo("Info", "Selecione uma máquina na aba Máquinas")
+            return
+
+        nome = self.get_nome()
+        dlg = HistoricoDialog(self.root, nome)
+        self.root.wait_window(dlg)
+        if not getattr(dlg, "result", None):
+            return
+        dados = dlg.result
+
+        # Captura IP/MAC da máquina selecionada no grid
+        sel = self.tree_maquinas.selection()[0]
+        vals = self.tree_maquinas.item(sel)["values"]
+        ip = vals[5] if len(vals) > 5 else ""
+        mac = vals[6] if len(vals) > 6 else ""
+
+        try:
+            run_query(
+                """
+                INSERT INTO historico_maquinas (maquina_id, evento, responsavel, ip, mac)
+                VALUES (?,?,?,?,?)
+                """,
+                (maquina_id, dados["evento"], dados.get("responsavel"), ip, mac)
+            )
+            self.load_eventos()
+        except sqlite3.Error as e:
+            messagebox.showerror("Erro", f"Não foi possível salvar o evento:\n{e}")
+
+    def _selected_evento_id(self):
+        sel = self.tree_eventos.selection()
+        if not sel:
+            return None
+        iid = sel[0]
+        return self.evento_ids.get(iid)
+
+    def del_evento(self):
+        evento_id = self._selected_evento_id()
+        if not evento_id:
+            messagebox.showinfo("Info", "Selecione um evento na aba Eventos")
+            return
+        # Pega info para confirmação
+        sel = self.tree_eventos.selection()[0]
+        vals = self.tree_eventos.item(sel)["values"]
+        evento_txt = vals[0] if len(vals) > 0 else ""
+        criado_em = vals[2] if len(vals) > 2 else ""
+        ip_txt = vals[3] if len(vals) > 3 else ""
+        mac_txt = vals[4] if len(vals) > 4 else ""
+        detalhe = f"'{evento_txt}'"
+        if criado_em:
+            detalhe += f" em {criado_em}"
+        if ip_txt or mac_txt:
+            detalhe += f" (IP: {ip_txt or '-'}, MAC: {mac_txt or '-'})"
+        if messagebox.askyesno("Confirmação", f"Excluir o evento {detalhe}?"):
+            run_query("DELETE FROM historico_maquinas WHERE id=?", (evento_id,))
+            # Recarrega a lista de eventos da máquina selecionada
+            self.load_eventos()
+
+    # ---------- Pesquisa ----------
+    def _configure_search_columns(self):
+        # Limpa itens atuais
+        for i in self.tree_pesquisa.get_children():
+            self.tree_pesquisa.delete(i)
+        # limpa o mapa
+        if hasattr(self, "_pesquisa_iid_to_mid"):
+            self._pesquisa_iid_to_mid.clear()
+        target = self.search_target.get()
+        if target == "eventos":
+            cols = ("Nome","Evento","Responsavel","Criado em","IP","MAC")
+            self.tree_pesquisa.configure(columns=cols)
+            for col in cols:
+                self.tree_pesquisa.heading(col, text=col)
+                self.tree_pesquisa.column(col, width=140)
+        else:
+            cols = ("Linha","Nome","Usuario","Setor","Andar","IP","MAC","Ponto","Comentario")
+            self.tree_pesquisa.configure(columns=cols)
+            for col in cols:
+                self.tree_pesquisa.heading(col, text=col)
+                self.tree_pesquisa.column(col, width=120)
+
+    def do_pesquisar(self):
+        termo = (self.entry_busca.get() or "").strip()
+        # Limpa resultados
+        for i in self.tree_pesquisa.get_children():
+            self.tree_pesquisa.delete(i)
+        self._pesquisa_iid_to_mid.clear()
+        if not termo:
+            return
+        like = f"%{termo}%"
+        if self.search_target.get() == "eventos":
+            rows = run_query(
+                """
+                SELECT m.id AS maquina_id, m.nome AS nome, h.evento, h.responsavel, h.created_at, h.ip, h.mac
+                 FROM historico_maquinas h
+                 JOIN maquinas m ON m.id = h.maquina_id
+                 WHERE
+                     h.evento LIKE ? OR
+                     h.responsavel LIKE ? OR
+                     IFNULL(h.ip,'') LIKE ? OR
+                     IFNULL(h.mac,'') LIKE ? OR
+                     m.nome LIKE ? OR
+                     IFNULL(m.usuario,'') LIKE ? OR
+                     IFNULL(m.setor,'') LIKE ? OR
+                     IFNULL(m.ip,'') LIKE ? OR
+                     IFNULL(m.mac,'') LIKE ?
+                 ORDER BY h.created_at DESC
+                 """,
+                (like, like, like, like, like, like, like, like, like),
+                fetch=True
+            )
+            for r in rows:
+                iid = self.tree_pesquisa.insert(
+                    "", "end",
+                    values=(r["nome"], r["evento"], r["responsavel"], r["created_at"], r["ip"], r["mac"])
+                )
+                self._pesquisa_iid_to_mid[iid] = r["maquina_id"]
+        else:
+            rows = run_query(
+                """
+                SELECT id, linha, nome, usuario, setor, andar, ip, mac, ponto, comentario
+                FROM maquinas
+                WHERE
+                    CAST(IFNULL(linha,'') AS TEXT) LIKE ? OR
+                    IFNULL(nome,'') LIKE ? OR
+                    IFNULL(usuario,'') LIKE ? OR
+                    IFNULL(setor,'') LIKE ? OR
+                    IFNULL(andar,'') LIKE ? OR
+                    IFNULL(ip,'') LIKE ? OR
+                    IFNULL(mac,'') LIKE ? OR
+                    IFNULL(ponto,'') LIKE ? OR
+                    IFNULL(comentario,'') LIKE ?
+                ORDER BY nome ASC
+                """,
+                (like, like, like, like, like, like, like, like, like),
+                fetch=True
+            )
+            for r in rows:
+                iid = self.tree_pesquisa.insert(
+                    "", "end",
+                    values=(r["linha"], r["nome"], r["usuario"], r["setor"], r["andar"], r["ip"], r["mac"], r["ponto"], r["comentario"])
+                )
+                self._pesquisa_iid_to_mid[iid] = r["id"]
+
+    def _select_maquina_in_tree(self, maquina_id: int) -> bool:
+        # Seleciona/rola para a máquina na aba Máquinas
+        for iid, mid in self.maquina_ids.items():
+            if mid == maquina_id:
+                self.tree_maquinas.selection_set(iid)
+                self.tree_maquinas.focus(iid)
+                self.tree_maquinas.see(iid)
+                return True
+        return False
+
+    def _on_pesquisa_activate(self, event):
+        sel = self.tree_pesquisa.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        maquina_id = self._pesquisa_iid_to_mid.get(iid)
+        if not maquina_id:
+            return
+        # Garante que a lista esteja carregada e seleciona
+        if not self._select_maquina_in_tree(maquina_id):
+            self.load_maquinas()
+            self._select_maquina_in_tree(maquina_id)
+        # Troca para a aba Máquinas para o usuário ver a seleção
+        try:
+            self.notebook.select(self.tab_maquinas)
+        except Exception:
+            pass
+
+    def _on_machine_activated(self, event):
+        sel = self.tree_maquinas.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        maquina_id = self.maquina_ids.get(iid)
+        if not maquina_id:
+            return
+        # Garante que a lista de eventos esteja carregada
+        if not self._selected_maquina_id():
+            self.load_eventos()
+        # Troca para a aba Eventos para o usuário ver os eventos
+        try:
+            self.notebook.select(self.tab_eventos)
+        except Exception:
+            pass    
+
+    def _on_tab_changed(self, event):
+        # Se a aba ativa for "Histórico de Eventos", atualiza a lista de eventos
+        current = event.widget.nametowidget(event.widget.select())
+        if current is self.tab_eventos:
+            self.load_eventos()
+
+# ----------------- Main -----------------
+if __name__ == "__main__":
+    # Evita NameError ao encerrar executável congelado (globals podem já ter sido limpos)
+    _init = globals().get("init_db")
+    if callable(_init):
+        _init()
+    root = tk.Tk()
+    app = InventarioApp(root)
+    root.mainloop()
