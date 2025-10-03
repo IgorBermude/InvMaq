@@ -5,7 +5,7 @@ a = Analysis(
     ['inventario_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('Inventario-clinica.csv', '.')],
+    datas=[],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
